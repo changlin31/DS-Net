@@ -1,7 +1,6 @@
-import time
+import logging
 
 from dyn_slim.models.dyn_slim_blocks import MultiHeadGate
-from dyn_slim.utils.slim_net_profiling import add_flops
 
 try:
     import apex
@@ -18,7 +17,6 @@ from timm.utils import *
 
 import torch
 import torch.nn as nn
-import torchvision.utils
 
 model_mac_hooks = []
 

@@ -36,6 +36,8 @@ class DSpwConv2d(nn.Conv2d):
         self.channel_choice = -1  # dynamic channel list index
         self.in_chn_static = len(in_channels_list) == 1
         self.out_chn_static = len(out_channels_list) == 1
+        self.running_kernel_size = 1
+        self.running_groups = 1
         self.mode = 'largest'
         self.prev_channel_choice = None
 
@@ -89,14 +91,12 @@ class DSdwConv2d(nn.Conv2d):
         self.channels_list = channels_list
         self.channel_choice = -1  # dynamic channel list index
         self.chn_static = len(channels_list) == 1
-        self.running_kernel_size = self.kernel_size
+        self.running_kernel_size = self.kernel_size[0]
         self.running_groups = self.groups
         self.mode = 'largest'
         self.prev_channel_choice = None
         self.channels_list_tensor = torch.from_numpy(
             np.array(self.channels_list)).float().cuda()
-        self.kernel_list_tensor = torch.from_numpy(
-            np.array(self.kernel_size)).float().cuda()
 
     def forward(self, x):
         # print(x.size(1))
@@ -157,7 +157,7 @@ class DSConv2d(nn.Conv2d):
         self.channel_choice = -1  # dynamic channel list index
         self.in_chn_static = len(in_channels_list) == 1
         self.out_chn_static = len(out_channels_list) == 1
-        self.running_kernel_size = self.kernel_size
+        self.running_kernel_size = self.kernel_size[0]
         self.running_groups = self.groups
         self.mode = 'largest'
         self.prev_channel_choice = None
@@ -165,8 +165,6 @@ class DSConv2d(nn.Conv2d):
             np.array(self.in_channels_list)).float().cuda()
         self.out_channels_list_tensor = torch.from_numpy(
             np.array(self.out_channels_list)).float().cuda()
-        self.kernel_list_tensor = torch.from_numpy(
-            np.array(self.kernel_size)).float().cuda()
 
     def forward(self, x):
         assert self.groups == 1, \
