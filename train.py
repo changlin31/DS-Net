@@ -584,8 +584,8 @@ def main():
     # test
     eval_metrics = []
     for choice in range(args.num_choice):
-        # reset bn if not smallest or largest
-        if choice != 0 and choice != args.num_choice - 1:
+        # reset bn if not smallest
+        if choice != 0:
             for layer in model.modules():
                 if isinstance(layer, nn.BatchNorm2d) or \
                         isinstance(layer, nn.SyncBatchNorm) or \

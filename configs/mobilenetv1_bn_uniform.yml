@@ -1,6 +1,6 @@
 pin_mem: True
 model: slimmable_mbnet_v1_bn_uniform
-num_choice: 15
+num_choice: 14
 
 sync_bn: false
 opt: sgd
