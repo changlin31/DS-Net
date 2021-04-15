@@ -6,9 +6,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from dyn_slim.models.dyn_slim_blocks import DSInvertedResidual, DSDepthwiseSeparable, set_exist_attr, MultiHeadGate
-from dyn_slim.models.dyn_slim_ops import DSConv2d, DSpwConv2d, DSBatchNorm2d, DSLinear
+from dyn_slim.models.dyn_slim_ops import DSConv2d, DSpwConv2d, DSBatchNorm2d, DSLinear, DSAdaptiveAvgPool2d
 from dyn_slim.models.dyn_slim_stages import DSStage
-from timm.models.layers import Swish, SelectAdaptivePool2d
+from timm.models.layers import Swish
 from timm.models.registry import register_model
 
 __all__ = ['DSNet']
@@ -32,8 +32,8 @@ choices_cfgs = {  # outc, layer, kernel, stride, type, has_gate
         [[32, 88], 1, 3, 1, 'ds', False],
         [[48, 168], 2, 3, 2, 'ds', False],
         [[96, 264], 2, 3, 2, 'ds', False],
-        [range(224, 640 + 1, 32), 6, 3, 2, 'ds', True],
-        [range(736, 1152 + 1, 32), 2, 3, 2, 'ds', True],
+        [list(range(224, 640 + 1, 32)), 6, 3, 2, 'ds', True],
+        [list(range(736, 1152 + 1, 32)), 2, 3, 2, 'ds', False],
         [],  # no head
     ],
 }
@@ -43,7 +43,7 @@ class DSNet(nn.Module):
     def __init__(self, num_classes=1000, in_chans=3,
                  choices_cfg=None, act_layer=nn.ReLU, noskip=False, drop_rate=0.,
                  drop_path_rate=0., se_ratio=0.25, norm_layer=DSBatchNorm2d,
-                 norm_kwargs=None, global_pool='avg', bias=False, has_head=True, **kwargs):
+                 norm_kwargs=None, bias=False, has_head=True, **kwargs):
         super(DSNet, self).__init__()
         assert drop_path_rate == 0., 'drop connect not supported yet!'
         # logging.warning('Following args are not used when building DSNet:', kwargs)
@@ -92,7 +92,7 @@ class DSNet(nn.Module):
         else:
             self.has_head = False
             self.num_features = self._in_chs_list
-        self.global_pool = SelectAdaptivePool2d(pool_type=global_pool)
+        self.global_pool = DSAdaptiveAvgPool2d(1, channel_list=self.num_features)
 
         # Classifier
         self.classifier = DSLinear(self.num_features, self.num_classes)
@@ -112,11 +112,11 @@ class DSNet(nn.Module):
         assert mode in ['largest', 'smallest', 'dynamic', 'uniform']
         for m in self.modules():
             set_exist_attr(m, 'mode', mode)
-        if mode == 'largest' or mode == 'dynamic':
+        if mode == 'largest':
             self.channel_choice = -1
             if self.has_head:
                 self.set_module_choice(self.conv_head)
-        elif mode == 'smallest':
+        elif mode == 'smallest' or mode == 'dynamic':
             self.channel_choice = 0
             if self.has_head:
                 self.set_module_choice(self.conv_head)
@@ -131,6 +131,7 @@ class DSNet(nn.Module):
                 self.random_choice = random.randint(1, 13)
 
         self.set_module_choice(self.conv_stem)
+        self.set_module_choice(self.bn1)
 
     def set_module_choice(self, m):
         set_exist_attr(m, 'channel_choice', self.channel_choice)
@@ -148,17 +149,16 @@ class DSNet(nn.Module):
     def get_gate(self):
         gate = nn.ModuleList()
         for n, m in self.named_modules():
-            if isinstance(m, MultiHeadGate):
-                gate += [m.conv_chn1_new, m.conv_chn2_new, m.norm1_new, m.norm2_new]
-        gate += [self.extra_gate_new]
+            if isinstance(m, MultiHeadGate) and m.has_gate:
+                gate += [m.gate]
         return gate
 
     def get_classifier(self):
         return self.classifier
 
-    def reset_classifier(self, num_classes, global_pool='avg'):
+    def reset_classifier(self, num_classes):
         self.num_classes = num_classes
-        self.global_pool = SelectAdaptivePool2d(pool_type=global_pool)
+        self.global_pool = DSAdaptiveAvgPool2d(1, channel_list=self.num_features)
         self.classifier = nn.Linear(
             self.num_features * self.global_pool.feat_mult(),
             num_classes) if num_classes else None
@@ -178,9 +178,13 @@ class DSNet(nn.Module):
             x = stage(x)
             self.set_self_choice(stage)
         if self.has_head:
+            self.set_module_choice(self.conv_head)
+            self.set_module_choice(self.bn2)
             x = self.conv_head(x)
             x = self.bn2(x)
             x = self.act2(x)
+        self.set_module_choice(self.global_pool)
+        self.set_module_choice(self.classifier)
         return x
 
     def forward(self, x):
@@ -190,8 +194,6 @@ class DSNet(nn.Module):
         if self.drop_rate > 0. and self.mode == 'largest':
             x = F.dropout(x, p=self.drop_rate, training=self.training)
         x = self.classifier(x)
-        if self.mode == 'dynamic':
-            self.gate_output = self.extra_gate_new(x)
         return x
 
 

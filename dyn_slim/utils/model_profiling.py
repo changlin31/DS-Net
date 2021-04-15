@@ -3,6 +3,7 @@ import time
 import numpy as np
 import torch
 import torch.nn as nn
+from timm.models.layers import Swish, SelectAdaptivePool2d
 
 try:
     import apex
@@ -84,20 +85,10 @@ def module_profiling(self, input, output, verbose, use_cuda=True):
             outs = output[0].size()
     else:
         outs = output.size()
-    # NOTE: There are some difference between type and isinstance, thus please
-    # be careful.
-    t = type(self)
-    if isinstance(self, nn.Conv2d):
+    if isinstance(self, (nn.Conv2d, nn.ConvTranspose2d)):
         self.n_macs = (ins[1] * outs[1] *
                        self.kernel_size[0] * self.kernel_size[1] *
-                       outs[2] * outs[3] // self.groups) * outs[0]
-        self.n_params = get_params(self)
-        self.n_seconds = run_forward(self, input, use_cuda=use_cuda)
-        self.name = conv_module_name_filter(self.__repr__())
-    elif isinstance(self, nn.ConvTranspose2d):
-        self.n_macs = (ins[1] * outs[1] *
-                       self.kernel_size[0] * self.kernel_size[1] *
-                       outs[2] * outs[3] // self.groups) * outs[0]
+                       outs[2] * outs[3] / self.groups) * outs[0]
         self.n_params = get_params(self)
         self.n_seconds = run_forward(self, input, use_cuda=use_cuda)
         self.name = conv_module_name_filter(self.__repr__())
@@ -106,13 +97,7 @@ def module_profiling(self, input, output, verbose, use_cuda=True):
         self.n_params = get_params(self)
         self.n_seconds = run_forward(self, input, use_cuda=use_cuda)
         self.name = self.__repr__()
-    elif isinstance(self, nn.AvgPool2d) or isinstance(self, nn.MaxPool2d):
-        # NOTE: this function is correct only when stride == kernel size
-        self.n_macs = ins[1] * ins[2] * ins[3] * ins[0]
-        self.n_params = 0
-        self.n_seconds = run_forward(self, input, use_cuda=use_cuda)
-        self.name = self.__repr__()
-    elif isinstance(self, nn.AdaptiveAvgPool2d):
+    elif isinstance(self, (nn.AvgPool2d, nn.AdaptiveAvgPool2d)):
         # NOTE: this function is correct only when stride == kernel size
         self.n_macs = ins[1] * ins[2] * ins[3] * ins[0]
         self.n_params = 0
@@ -123,37 +108,17 @@ def module_profiling(self, input, output, verbose, use_cuda=True):
         self.n_macs = 0
         self.n_params = 0
         self.n_seconds = 0
-        # num_children = 0
-        # for m in self.children():
-        #     if getattr(m, 'n_macs', None) is None and verbose \
-        #             and type(m) not in [nn.Sequential, nn.ModuleList, nn.BatchNorm2d]:
-        #         print('WARNING: leaf module {} not used in forward.'.format(type(m)))
-        #     self.n_macs += getattr(m, 'n_macs', 0) if getattr(m, 'n_macs',
-        #                                                       0) is not None else 0
-        #     self.n_params += getattr(m, 'n_params', 0) if getattr(m, 'n_macs',
-        #                                                           0) is not None else 0
-        #     self.n_seconds += getattr(m, 'n_seconds', 0)
-        #     num_children += 1
-        #     if isinstance(m, nn.Sequential) or isinstance(m, nn.ModuleList):
-        #         mac, param, sec, child = _count_sequential(m, verbose)
-        #         self.n_macs += mac
-        #         self.n_params += param
-        #         self.n_seconds += sec
-        #         num_children += child
         ignore_zeros_t = [
             nn.BatchNorm2d, nn.Dropout2d, nn.Dropout,
             nn.Sequential, nn.ModuleList,
-            nn.ReLU6, nn.ReLU, nn.MaxPool2d,
+            nn.ReLU6, nn.ReLU, nn.MaxPool2d, Swish,
             nn.modules.padding.ZeroPad2d, nn.modules.activation.Sigmoid,
-            SyncBatchNorm,
-            # NonzeroBatchNorm2d, SplitMABN,
-            nn.GroupNorm
+            SyncBatchNorm, nn.GroupNorm, SelectAdaptivePool2d,
         ]
         if (not getattr(self, 'ignore_model_profiling', False) and
-            self.n_macs == 0 and
-            t not in ignore_zeros_t) and verbose:
-            print(
-                'WARNING: leaf module {} has zero n_macs.'.format(type(self)))
+                len(list(self.named_modules())) == 1 and verbose and
+                self.n_macs == 0 and not isinstance(self, tuple(ignore_zeros_t)) and verbose):
+            print('WARNING: leaf module {} has zero n_macs.'.format(type(self)))
         return
     if verbose:
         print(
@@ -239,16 +204,16 @@ def model_profiling(model, height, width, batch=1, channel=3, use_cuda=True,
             name_space + params_space + macs_space + seconds_space, '-'))
     model(data)
     if verbose:
-        print(''.center(
-            name_space + params_space + macs_space + seconds_space, '-'))
+        # print(''.center(
+        #     name_space + params_space + macs_space + seconds_space, '-'))
         model.n_macs = 0
         model.n_params = 0
         model.n_seconds = 0
         num_children = 0
         for n, m in model.named_modules():
             if getattr(m, 'n_macs', None) is None and verbose \
-                    and type(m) not in [nn.Sequential, nn.ModuleList, nn.BatchNorm2d]:
-                print('WARNING: leaf module {} not used in forward.'.format(type(m)))
+                    and not isinstance(m, (nn.Sequential, nn.ModuleList, nn.BatchNorm2d, Swish, nn.ReLU)):
+                print('WARNING: leaf module {} ({}) not used in forward.'.format(n, type(m)))
             model.n_macs += getattr(m, 'n_macs', 0) if getattr(m, 'n_macs',
                                                               0) is not None else 0
             model.n_params += getattr(m, 'n_params', 0) if getattr(m, 'n_macs',

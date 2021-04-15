@@ -35,7 +35,17 @@ Accuracy vs. complexity on ImageNet.
  ```
 
 ### 3. Stage II: Gate Training
- - Will be available soon
+ - Modify `resume:` to your supernet checkpoint. 
+   Recalibrate BN before gate training
+   ```
+   python -m torch.distributed.launch --nproc_per_node=8 train.py /PATH/TO/ImageNet -c ./configs/mobilenetv1_bn_uniform_reset_bn.yml
+   ```
+
+ - Modify `resume:` to your supernet checkpoint after BN recalibration. 
+   Start gate training
+   ```
+   python -m torch.distributed.launch --nproc_per_node=8 train.py /PATH/TO/ImageNet -c ./configs/mobilenetv1_bn_uniform_gate.yml
+   ```
 
 ## Citation
 If you use our code for your paper, please cite:

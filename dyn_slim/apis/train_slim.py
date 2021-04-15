@@ -147,7 +147,7 @@ def train_epoch_slim(
                     'LR: {lr:.3e}  '
                     'Data: {data_time.val:.3f} ({data_time.avg:.3f})'.format(
                         epoch,
-                        batch_idx, len(loader),
+                        batch_idx, last_idx,
                         100. * batch_idx / last_idx,
                         isdistill='(distill)' if args.ieb else '',
                         loss_smallest=losses_m_smallest,

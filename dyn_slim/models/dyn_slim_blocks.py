@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from dyn_slim.models.dyn_slim_ops import DSpwConv2d, DSdwConv2d, DSBatchNorm2d
+from dyn_slim.models.dyn_slim_ops import DSpwConv2d, DSdwConv2d, DSBatchNorm2d, DSAvgPool2d, DSAdaptiveAvgPool2d
 from timm.models.layers import sigmoid
 
 
@@ -34,20 +34,18 @@ class DSInvertedResidual(nn.Module):
         self.has_residual = not noskip
         self.drop_path_rate = drop_path_rate
         self.has_gate = has_gate
+        self.downsample = None
         if self.has_residual:
             if in_channels_list[-1] != out_channels_list[-1] or stride == 2:
                 downsample_layers = []
                 if stride == 2:
-                    downsample_layers += [nn.AvgPool2d(2, 2, ceil_mode=True,
-                                                       count_include_pad=False)]
+                    downsample_layers += [DSAvgPool2d(2, 2, ceil_mode=True,
+                                                       count_include_pad=False, channel_list=in_channels_list)]
                 if in_channels_list[-1] != out_channels_list[-1]:
                     downsample_layers += [DSpwConv2d(in_channels_list,
                                                      out_channels_list,
                                                      bias=bias)]
                 self.downsample = nn.Sequential(*downsample_layers)
-            else:
-                self.downsample = None
-
         # Point-wise expansion
         self.conv_pw = DSpwConv2d(in_channels_list, mid_channels_list, bias=bias)
         self.bn1 = norm_layer(mid_channels_list, **norm_kwargs)
@@ -55,6 +53,7 @@ class DSInvertedResidual(nn.Module):
 
         # Depth-wise convolution
         self.conv_dw = DSdwConv2d(mid_channels_list,
+                                  kernel_size=kernel_size,
                                   stride=stride,
                                   dilation=dilation,
                                   bias=bias)
@@ -64,7 +63,7 @@ class DSInvertedResidual(nn.Module):
         # Channel attention and gating
         self.gate = MultiHeadGate(mid_channels_list,
                                 se_ratio=se_ratio,
-                                channel_gate_num=len(out_channels_list) if has_gate else 0)
+                                channel_gate_num=4 if has_gate else 0)
 
         # Point-wise linear projection
         self.conv_pwl = DSpwConv2d(mid_channels_list, out_channels_list, bias=bias)
@@ -152,7 +151,10 @@ class DSInvertedResidual(nn.Module):
         elif self.mode == 'random':
             return random.randint(0, len(self.out_channels_list) - 1)
         elif self.mode == 'dynamic':
-            return self.se.get_gate()
+            if self.gate.has_gate:
+                return self.gate.get_gate()
+            else:
+                return 0
 
     def get_gate(self):
         return self.channel_choice
@@ -175,19 +177,18 @@ class DSDepthwiseSeparable(nn.Module):
         self.has_residual = not noskip
         self.drop_path_rate = drop_path_rate
         self.has_gate = has_gate
+        self.downsample = None
         if self.has_residual:
             if in_channels_list[-1] != out_channels_list[-1] or stride == 2:
                 downsample_layers = []
                 if stride == 2:
-                    downsample_layers += [nn.AvgPool2d(2, 2, ceil_mode=True,
-                                                       count_include_pad=False)]
+                    downsample_layers += [DSAvgPool2d(2, 2, ceil_mode=True,
+                                                       count_include_pad=False, channel_list=in_channels_list)]
                 if in_channels_list[-1] != out_channels_list[-1]:
                     downsample_layers += [DSpwConv2d(in_channels_list,
                                                      out_channels_list,
                                                      bias=bias)]
                 self.downsample = nn.Sequential(*downsample_layers)
-            else:
-                self.downsample = None
         # Depth-wise convolution
         self.conv_dw = DSdwConv2d(in_channels_list,
                                   kernel_size=kernel_size,
@@ -200,7 +201,7 @@ class DSDepthwiseSeparable(nn.Module):
         # Channel attention and gating
         self.gate = MultiHeadGate(in_channels_list,
                                 se_ratio=se_ratio,
-                                channel_gate_num=len(out_channels_list) if has_gate else 0)
+                                channel_gate_num=4 if has_gate else 0)
 
         # Point-wise convolution
         self.conv_pw = DSpwConv2d(in_channels_list, out_channels_list, bias=bias)
@@ -232,8 +233,9 @@ class DSDepthwiseSeparable(nn.Module):
         # Channel attention and gating
         x = self.gate(x)
         if self.has_gate:
+            self.prev_channel_choice = self.channel_choice
             self.channel_choice = self._new_gate()
-            self._set_gate()
+            self._set_gate(set_pw=True)
         # Point-wise convolution
         x = self.conv_pw(x)
         x = self.bn2(x)
@@ -249,9 +251,14 @@ class DSDepthwiseSeparable(nn.Module):
 
         return x
 
-    def _set_gate(self):
+    def _set_gate(self, set_pw=False):
         for n, m in self.named_modules():
             set_exist_attr(m, 'channel_choice', self.channel_choice)
+        if set_pw:
+            self.conv_pw.prev_channel_choice = self.prev_channel_choice
+            if self.downsample is not None:
+                for n, m in self.downsample.named_modules():
+                    set_exist_attr(m, 'prev_channel_choice', self.prev_channel_choice)
 
     def _new_gate(self):
         if self.mode == 'largest':
@@ -263,27 +270,38 @@ class DSDepthwiseSeparable(nn.Module):
         elif self.mode == 'random':
             return random.randint(0, len(self.out_channels_list) - 1)
         elif self.mode == 'dynamic':
-            return self.se.get_gate()
+            if self.gate.has_gate:
+                return self.gate.get_gate()
+            else:
+                return 0
 
     def get_gate(self):
         return self.channel_choice
 
 
 class MultiHeadGate(nn.Module):
-    def __init__(self, in_chs, se_ratio=0.25, reduced_base_chs=None,
-                 act_layer=nn.ReLU, attn_act_fn=sigmoid, divisor=1, channel_gate_num=None):
+    def __init__(self, in_chs, se_ratio=0.25, reduced_base_chs=None, act_layer=nn.ReLU,
+                 attn_act_fn=sigmoid, divisor=1, channel_gate_num=None, gate_num_features=1024):
         super(MultiHeadGate, self).__init__()
         self.attn_act_fn = attn_act_fn
         self.channel_gate_num = channel_gate_num
         reduced_chs = make_divisible((reduced_base_chs or in_chs[-1]) * se_ratio, divisor)
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.avg_pool = DSAdaptiveAvgPool2d(1, channel_list=in_chs)
         self.conv_reduce = DSpwConv2d(in_chs, [reduced_chs], bias=True)
         self.act1 = act_layer(inplace=True)
         self.conv_expand = DSpwConv2d([reduced_chs], in_chs, bias=True)
 
-        #  Dynamic Gate and Training Stage II will be released soon
+        self.has_gate = False
+        if channel_gate_num > 1:
+            self.has_gate = True
+            # self.gate = nn.Sequential(DSpwConv2d([reduced_chs], [gate_num_features], bias=True),
+            #                           act_layer(inplace=True),
+            #                           nn.Dropout2d(p=0.2),
+            #                           DSpwConv2d([gate_num_features], [channel_gate_num], bias=True))
+            self.gate = nn.Sequential(DSpwConv2d([reduced_chs], [channel_gate_num], bias=False))
 
         self.mode = 'largest'
+        self.keep_gate, self.print_gate, self.print_idx = None, None, None
         self.channel_choice = None
         self.initialized = False
         if self.attn_act_fn == 'tanh':
@@ -301,31 +319,40 @@ class MultiHeadGate(nn.Module):
             attn = self.attn_act_fn(attn)
         x = x * attn
 
+        if self.mode == 'dynamic' and self.has_gate:
+            channel_choice = self.gate(x_reduced).squeeze(-1).squeeze(-1)
+            self.keep_gate, self.print_gate, self.print_idx = gumbel_softmax(channel_choice, dim=1, training=self.training)
+            self.channel_choice = self.print_gate, self.print_idx
+        else:
+            self.channel_choice = None
+
         return x
 
     def get_gate(self):
         return self.channel_choice
 
 
-def gumbel_softmax(logits, tau=1, hard=False, dim=-1, training=True):
+def gumbel_softmax(logits, tau=1, hard=False, dim=1, training=True):
     """ See `torch.nn.functional.gumbel_softmax()` """
-    if training:
-        noise = torch.rand_like(logits)
-        gumbels = -(-noise.log()).log()
-        gumbels = (logits + gumbels) / tau  # ~Gumbel(logits,tau)
-    else:
-        gumbels = logits
-    y_soft = gumbels.softmax(-1)
-    if hard:
-        # Straight through.
+    # if training:
+    # gumbels = -torch.empty_like(logits,
+    #                             memory_format=torch.legacy_contiguous_format).exponential_().log()  # ~Gumbel(0,1)
+    # gumbels = (logits + gumbels) / tau  # ~Gumbel(logits,tau)
+    # # else:
+    # #     gumbels = logits
+    # y_soft = gumbels.softmax(dim)
+
+    gumbels = -torch.empty_like(logits, memory_format=torch.legacy_contiguous_format).exponential_().log()  # ~Gumbel(0,1)
+    gumbels = (logits + gumbels) / tau  # ~Gumbel(logits,tau)
+    y_soft = gumbels.softmax(dim)
+    with torch.no_grad():
         index = y_soft.max(dim, keepdim=True)[1]
-        y_hard = torch.zeros_like(logits).scatter_(dim, index, 1.0)
-        # y_hard = (y_soft > 0.5).float()
-        ret = y_hard - y_soft.detach() + y_soft
-        return ret, index
-    else:
-        # Reparametrization trick.
-        return y_soft
+        y_hard = torch.zeros_like(logits, memory_format=torch.legacy_contiguous_format).scatter_(dim, index, 1.0)
+        #  **test**
+        # index = 0
+        # y_hard = torch.Tensor([1, 0, 0, 0]).repeat(logits.shape[0], 1).cuda()
+    ret = y_hard - y_soft.detach() + y_soft
+    return y_soft, ret, index
 
 
 def drop_path(inputs, training=False, drop_path_rate=0.):

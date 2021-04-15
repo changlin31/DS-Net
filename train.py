@@ -24,12 +24,13 @@ import numpy as np
 import yaml
 from timm.utils import get_outdir, distribute_bn, update_summary
 from timm.data import Dataset, create_loader, resolve_data_config, AugMixDataset
-from timm.models import create_model, resume_checkpoint, convert_splitbn_model
+from timm.models import create_model, convert_splitbn_model
 from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy, JsdCrossEntropy
 from timm.optim import create_optimizer
 from timm.scheduler import create_scheduler
 
-from dyn_slim.utils import model_profiling, setup_default_logging, CheckpointSaver, ModelEma
+from dyn_slim.apis.train_slim_gate import validate_gate
+from dyn_slim.utils import model_profiling, setup_default_logging, CheckpointSaver, ModelEma, resume_checkpoint
 from dyn_slim.apis import train_epoch_slim, validate_slim, train_epoch_slim_gate
 
 import torch
@@ -295,12 +296,6 @@ def main():
         bn_eps=args.bn_eps,
         checkpoint_path=args.initial_checkpoint)
 
-    # optionally resume from a checkpoint
-    resume_state = {}
-    resume_epoch = None
-    if args.resume:
-        resume_state, resume_epoch = resume_checkpoint(model, args.resume)
-
     if args.local_rank == 0:
         logging.info('Model %s created, param count: %d' %
                      (args.model, sum([m.numel() for m in model.parameters()])))
@@ -326,14 +321,17 @@ def main():
     else:
         model.cuda()
 
-    if args.train_mode == 'se':
-        optimizer = create_optimizer(args, model.get_se())
-    elif args.train_mode == 'bn':
-        optimizer = create_optimizer(args, model.get_bn())
-    elif args.train_mode == 'all':
-        optimizer = create_optimizer(args, model)
-    elif args.train_mode == 'gate':
+    if args.train_mode == 'gate':
         optimizer = create_optimizer(args, model.get_gate())
+    else:
+        optimizer = create_optimizer(args, model)
+
+    # optionally resume from a checkpoint
+    resume_epoch = None
+    if args.resume:
+        resume_epoch = resume_checkpoint(model, checkpoint_path=args.resume,
+                                         optimizer=optimizer if not args.no_resume_opt else None,
+                                         log_info=args.local_rank == 0, strict=False)
 
     use_amp = False
     if has_apex and args.amp:
@@ -343,19 +341,6 @@ def main():
         logging.info('NVIDIA APEX {}. AMP {}.'.format(
             'installed' if has_apex else 'not installed', 'on' if use_amp else 'off'))
 
-
-    if resume_state and not args.no_resume_opt:
-        # ----------- Load Optimizer ---------
-        if 'optimizer' in resume_state:
-            if args.local_rank == 0:
-                logging.info('Restoring Optimizer state from checkpoint')
-            optimizer.load_state_dict(resume_state['optimizer'])
-        if use_amp and 'amp' in resume_state and 'load_state_dict' in amp.__dict__:
-            if args.local_rank == 0:
-                logging.info('Restoring NVIDIA AMP state from checkpoint')
-            amp.load_state_dict(resume_state['amp'])
-    del resume_state
-
     model_ema = None
     if args.model_ema:
         # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
@@ -363,7 +348,9 @@ def main():
             model,
             decay=args.model_ema_decay,
             device='cpu' if args.model_ema_force_cpu else '',
-            resume=args.resume)
+            resume=args.resume,
+            log_info=args.local_rank == 0,
+            resume_strict=False)
 
     if args.distributed:
         if args.sync_bn:
@@ -526,37 +513,47 @@ def main():
                     optimizer_step=args.optimizer_step,
                 )
             if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
+                torch.cuda.synchronize()
                 if args.local_rank == 0:
                     logging.info("Distributing BatchNorm running means and vars")
                 distribute_bn(model, args.world_size, args.dist_bn == 'reduce')
 
             # eval
             if args.gate_train:
-                eval_sample_list = ['dynamic']
+                eval_metrics = [validate_gate(model,
+                                              loader_eval,
+                                              validate_loss_fn,
+                                              args)]
+                if model_ema is not None and not args.model_ema_force_cpu:
+                    ema_eval_metrics = [validate_gate(model_ema.ema,
+                                                      loader_eval,
+                                                      validate_loss_fn,
+                                                      args,
+                                                      log_suffix='(EMA)')]
+
+                    eval_metrics = ema_eval_metrics
             else:
                 if epoch % 10 == 0 and epoch != 0:
                     eval_sample_list = ['smallest', 'largest', 'uniform']
                 else:
                     eval_sample_list = ['smallest', 'largest']
+                eval_metrics = [validate_slim(model,
+                                              loader_eval,
+                                              validate_loss_fn,
+                                              args,
+                                              model_mode=model_mode)
+                                for model_mode in eval_sample_list]
+                if model_ema is not None and not args.model_ema_force_cpu:
+                    ema_eval_metrics = [validate_slim(model_ema.ema,
+                                                      loader_eval,
+                                                      validate_loss_fn,
+                                                      args,
+                                                      log_suffix='(EMA)',
+                                                      model_mode=model_mode)
+                                        for model_mode in
+                                        eval_sample_list]
 
-            eval_metrics = [validate_slim(model,
-                                      loader_eval,
-                                      validate_loss_fn,
-                                      args,
-                                      model_mode=model_mode)
-                        for model_mode in eval_sample_list]
-
-            if model_ema is not None and not args.model_ema_force_cpu:
-
-                ema_eval_metrics = [validate_slim(model_ema.ema,
-                                                  loader_eval,
-                                                  validate_loss_fn,
-                                                  args,
-                                                  model_mode=model_mode)
-                                    for model_mode in
-                                    eval_sample_list]
-
-                eval_metrics = ema_eval_metrics
+                    eval_metrics = ema_eval_metrics
 
             if isinstance(eval_metrics, list):
                 eval_metrics = eval_metrics[0]
@@ -583,37 +580,76 @@ def main():
 
     # test
     eval_metrics = []
-    for choice in range(args.num_choice):
-        # reset bn if not smallest
-        if choice != 0:
-            for layer in model.modules():
+
+    # reset bn
+    if args.reset_bn:
+        if args.local_rank == 0:
+            logging.info("Recalibrating BatchNorm statistics...")
+        if model_ema is not None and not args.model_ema_force_cpu:
+            model_list = [model, model_ema.ema]
+        else:
+            model_list = [model]
+        for model_ in model_list:
+            for layer in model_.modules():
                 if isinstance(layer, nn.BatchNorm2d) or \
                         isinstance(layer, nn.SyncBatchNorm) or \
                         (has_apex and isinstance(layer, apex.parallel.SyncBatchNorm)):
                     layer.reset_running_stats()
-            model.train()
+            model_.train()
             with torch.no_grad():
                 for batch_idx, (input, target) in enumerate(loader_bn):
-                    if args.slim_train:
-                        if hasattr(model, 'module'):
-                            model.module.set_mode('uniform', choice=choice)
-                        else:
-                            model.set_mode('uniform', choice=choice)
-                        model(input)
+                    for choice in range(args.num_choice):
+                        if args.slim_train:
+                            if hasattr(model_, 'module'):
+                                model_.module.set_mode('uniform', choice=choice)
+                            else:
+                                model_.set_mode('uniform', choice=choice)
+                            model_(input)
 
                     if batch_idx % 1000 == 0 and batch_idx != 0:
-                        print('Subnet {} : reset bn for {} steps'.format(choice, batch_idx))
                         break
+            if args.local_rank == 0:
+                logging.info("Finish recalibrating BatchNorm statistics.")
             if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
+                torch.cuda.synchronize()
                 if args.local_rank == 0:
                     logging.info("Distributing BatchNorm running means and vars")
-                distribute_bn(model, args.world_size, args.dist_bn == 'reduce')
+                distribute_bn(model_, args.world_size, args.dist_bn == 'reduce')
 
+    # dynamic
+    if args.gate_train:
+        eval_metrics = [validate_gate(model,
+                                      loader_eval,
+                                      validate_loss_fn,
+                                      args)]
+        if model_ema is not None and not args.model_ema_force_cpu:
+            ema_eval_metrics = [validate_gate(model_ema.ema,
+                                              loader_eval,
+                                              validate_loss_fn,
+                                              args,
+                                              log_suffix='(EMA)')]
+
+            eval_metrics = ema_eval_metrics
+    # supernet
+    for choice in range(args.num_choice):
         eval_metrics.append(validate_slim(model,
                                           loader_eval,
                                           validate_loss_fn,
                                           args,
                                           model_mode=choice))
+    if model_ema is not None and not args.model_ema_force_cpu:
+        for choice in range(args.num_choice):
+            eval_metrics.append(validate_slim(model_ema.ema,
+                                              loader_eval,
+                                              validate_loss_fn,
+                                              args,
+                                              log_suffix='(EMA)',
+                                              model_mode=choice))
+    if args.local_rank == 0:
+        best_metric, best_epoch = saver.save_checkpoint(
+            model, optimizer, args,
+            epoch=0, model_ema=model_ema, metric=eval_metrics[0], use_amp=use_amp)
+
     if args.local_rank == 0:
         print('Test results of the last epoch:\n', eval_metrics)
 

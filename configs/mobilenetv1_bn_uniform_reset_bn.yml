@@ -1,13 +1,13 @@
 pin_mem: True
 model: slimmable_mbnet_v1_bn_uniform
-num_choice: 14
+num_choice: 4
 
 sync_bn: false
 opt: sgd
 sched: cosine
-epochs: 150
+epochs: 30
 warmup_lr: 1e-5
-weight_decay: 0.0001
+weight_decay: 0.01
 drop: 0.2
 model_ema: true
 model_ema_decay: 0.997
@@ -23,17 +23,18 @@ mixup: 0.
 color_jitter: 0.06
 amp: false
 validation_batch_size_multiplier: 4
-warmup_epochs: 5
+warmup_epochs: 0
 workers: 10
 pretrained: false
-resume: ''
-#no_resume_opt: true
-#start_epoch: 0
+resume: '' # Your supernet checkpoint
+no_resume_opt: true
+start_epoch: 0
 
-train_mode: all
-test_mode: false
+train_mode: gate
+test_mode: true
 
 slim_train: true
 ieb: true
-gate_train: false
+gate_train: true
+dist_bn: reduce
 reset_bn: true
