@@ -646,9 +646,9 @@ def main():
                                               log_suffix='(EMA)',
                                               model_mode=choice))
     if args.local_rank == 0:
-        best_metric, best_epoch = saver.save_checkpoint(
+        saver.save_checkpoint(
             model, optimizer, args,
-            epoch=0, model_ema=model_ema, metric=eval_metrics[0], use_amp=use_amp)
+            epoch=0, model_ema=model_ema, metric=None, use_amp=use_amp)
 
     if args.local_rank == 0:
         print('Test results of the last epoch:\n', eval_metrics)
