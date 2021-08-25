@@ -195,6 +195,7 @@ parser.add_argument("--local_rank", default=0, type=int)
 
 parser.add_argument('--slim_train', action='store_true', default=False)
 parser.add_argument('--gate-train', action='store_true', default=False)
+parser.add_argument('--start_chn_idx', type=int, default=0, help='Modify this to change the dynamic routing space.')
 parser.add_argument('--ieb', action='store_true', default=False)
 parser.add_argument('--test_mode', action='store_true', default=False)
 
@@ -589,7 +590,7 @@ def main():
             model_list = [model, model_ema.ema]
         else:
             model_list = [model]
-        for model_ in model_list:
+        for idx, model_ in enumerate(model_list):
             for layer in model_.modules():
                 if isinstance(layer, nn.BatchNorm2d) or \
                         isinstance(layer, nn.SyncBatchNorm) or \
@@ -609,7 +610,7 @@ def main():
                     if batch_idx % 1000 == 0 and batch_idx != 0:
                         break
             if args.local_rank == 0:
-                logging.info("Finish recalibrating BatchNorm statistics.")
+                logging.info("Finish recalibrating BatchNorm statistics{}.".format(' (EMA)' if idx == 1 else ''))
             if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
                 torch.cuda.synchronize()
                 if args.local_rank == 0:
@@ -630,21 +631,21 @@ def main():
                                               log_suffix='(EMA)')]
 
             eval_metrics = ema_eval_metrics
-    # supernet
-    for choice in range(args.num_choice):
-        eval_metrics.append(validate_slim(model,
-                                          loader_eval,
-                                          validate_loss_fn,
-                                          args,
-                                          model_mode=choice))
-    if model_ema is not None and not args.model_ema_force_cpu:
+    else:  # supernet
         for choice in range(args.num_choice):
-            eval_metrics.append(validate_slim(model_ema.ema,
+            eval_metrics.append(validate_slim(model,
                                               loader_eval,
                                               validate_loss_fn,
                                               args,
-                                              log_suffix='(EMA)',
                                               model_mode=choice))
+        if model_ema is not None and not args.model_ema_force_cpu:
+            for choice in range(args.num_choice):
+                eval_metrics.append(validate_slim(model_ema.ema,
+                                                  loader_eval,
+                                                  validate_loss_fn,
+                                                  args,
+                                                  log_suffix='(EMA)',
+                                                  model_mode=choice))
     if args.local_rank == 0:
         saver.save_checkpoint(
             model, optimizer, args,

@@ -35,6 +35,6 @@ test_mode: true
 
 slim_train: true
 ieb: true
-gate_train: true
+gate_train: false
 dist_bn: reduce
 reset_bn: true

@@ -30,7 +30,7 @@ def train_epoch_slim_gate(
         epoch, model, loader, optimizer, loss_fn, args,
         lr_scheduler=None, saver=None, output_dir='', use_amp=False, model_ema=None,
         optimizer_step=1):
-    start_chn_idx = 0
+    start_chn_idx = args.start_chn_idx
     num_gate = 1
 
     batch_time_m = AverageMeter()
@@ -208,7 +208,7 @@ def train_epoch_slim_gate(
 
 @torch.no_grad()
 def validate_gate(model, loader, loss_fn, args, log_suffix=''):
-    start_chn_idx = 0
+    start_chn_idx = args.start_chn_idx
     num_gate = 1
 
     batch_time_m = AverageMeter()
