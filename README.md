@@ -15,6 +15,17 @@ Architecture of DS-Net. The width of each supernet stage is adjusted adaptively 
 Accuracy vs. complexity on ImageNet.
 </p>
 
+## Pretrained Supernet
+- [Supernet Checkpoint](https://github.com/changlin31/DS-Net/releases/download/v0.0.1/DS_MBNet-70_1.pth.tar)
+- Here is a summary of sub-networks performance of the pretrained supernet:
+
+  |    Subnetwork    | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 |
+  | ----------------- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+  |       MAdds       | 133M  | 153M  | 175M  | 200M  | 226M  | 255M  | 286M  | 319M  | 355M  | 393M  | 433M  | 475M  | 519M  | 565M  |
+  |      Top-1 (%)    | 70.1  | 70.4  | 70.8  | 71.2  | 71.6  | 72.0  | 72.4  | 72.7  | 73.0  | 73.3  | 73.6  | 73.9  | 74.1  | 74.6  |
+  |      Top-5 (%)    | 89.4  |  89.6 | 89.9  | 90.2  | 90.3  | 90.6  | 90.9  | 91.0  | 91.2  | 91.4  | 91.5  | 91.7  | 91.8  | 92.0  |
+
+
 ## Usage
 ### 1. Requirements
 - Install [PyTorch](http://pytorch.org/) 1.2.0+, for example:
@@ -35,13 +46,13 @@ Accuracy vs. complexity on ImageNet.
  ```
 
 ### 3. Stage II: Gate Training
- - Modify `resume:` to your supernet checkpoint. 
+ - Modify `resume:` in `configs/mobilenetv1_bn_uniform_reset_bn.yml` to your supernet checkpoint. 
    Recalibrate BN before gate training
    ```
    python -m torch.distributed.launch --nproc_per_node=8 train.py /PATH/TO/ImageNet -c ./configs/mobilenetv1_bn_uniform_reset_bn.yml
    ```
 
- - Modify `resume:` to your supernet checkpoint after BN recalibration. 
+ - Modify `resume:` in `configs/mobilenetv1_bn_uniform_gate.yml` to your supernet checkpoint after BN recalibration or our pretrained [Supernet Checkpoint](https://github.com/changlin31/DS-Net/releases/download/v0.0.1/DS_MBNet-70_1.pth.tar). 
    Start gate training
    ```
    python -m torch.distributed.launch --nproc_per_node=8 train.py /PATH/TO/ImageNet -c ./configs/mobilenetv1_bn_uniform_gate.yml
