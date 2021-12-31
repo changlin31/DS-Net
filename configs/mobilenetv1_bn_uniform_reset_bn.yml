@@ -34,7 +34,8 @@ train_mode: gate
 test_mode: true
 
 slim_train: true
-ieb: true
+inplace_bootstrap: true
+ensemble_ib: false
 gate_train: false
 dist_bn: reduce
 reset_bn: true

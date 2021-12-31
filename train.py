@@ -196,7 +196,8 @@ parser.add_argument("--local_rank", default=0, type=int)
 parser.add_argument('--slim_train', action='store_true', default=False)
 parser.add_argument('--gate-train', action='store_true', default=False)
 parser.add_argument('--start_chn_idx', type=int, default=0, help='Modify this to change the dynamic routing space.')
-parser.add_argument('--ieb', action='store_true', default=False)
+parser.add_argument('--inplace_bootstrap', action='store_true', default=False)
+parser.add_argument('--ensemble_ib', action='store_true', default=False)
 parser.add_argument('--test_mode', action='store_true', default=False)
 
 
@@ -478,7 +479,7 @@ def main():
     else:
         train_loss_fn = nn.CrossEntropyLoss().cuda()
         validate_loss_fn = train_loss_fn
-    if args.ieb:
+    if args.inplace_bootstrap:
         distill_loss_fn = SoftTargetCrossEntropy().cuda()
     else:
         distill_loss_fn = None
@@ -563,13 +564,12 @@ def main():
                 # step LR for next epoch
                 lr_scheduler.step(epoch + 1, eval_metrics[eval_metric])
 
-            # save
-            update_summary(
-                epoch, train_metrics, eval_metrics,
-                os.path.join(output_dir, 'summary.csv'),
-                write_header=best_metric is None)
-
             if saver is not None:
+                # save
+                update_summary(
+                    epoch, train_metrics, eval_metrics,
+                    os.path.join(output_dir, 'summary.csv'),
+                    write_header=best_metric is None)
                 # save proper checkpoint with eval metric
                 save_metric = eval_metrics[eval_metric]
                 best_metric, best_epoch = saver.save_checkpoint(

@@ -67,7 +67,7 @@ def train_epoch_slim(
 
             if model_mode == 'largest':
                 loss = loss_fn(output, target)
-                if args.ieb:
+                if args.inplace_bootstrap:
                     with torch.no_grad():
                         if hasattr(model_ema.ema, 'module'):
                             model_ema.ema.module.set_mode(model_mode)
@@ -76,28 +76,28 @@ def train_epoch_slim(
                         output_largest = model_ema.ema(input)
                     guide_list.append(output_largest)
                 loss_largest = loss
-            elif model_mode != 'smallest':
-                if args.ieb:
+            elif model_mode != 'smallest':  # random sub-models
+                if args.inplace_bootstrap:
                     loss = distill_loss_fn(output, F.softmax(output_largest, dim=1))
-                    # with torch.no_grad():
-                    #     guide_output = model_ema.ema(input)
-                    with torch.no_grad():
-                        if hasattr(model_ema.ema, 'module'):
-                            model_ema.ema.module.set_mode(model_mode)
-                        else:
-                            model_ema.ema.set_mode(model_mode)
-                        guide_output = model_ema.ema(input)
-                    guide_list.append((guide_output))
-                    # guide_list.append((output.detach()))
+                    if args.ensemble_ib:
+                        with torch.no_grad():
+                            if hasattr(model_ema.ema, 'module'):
+                                model_ema.ema.module.set_mode(model_mode)
+                            else:
+                                model_ema.ema.set_mode(model_mode)
+                            guide_output = model_ema.ema(input)
+                        guide_list.append((guide_output))
                 else:
                     loss = loss_fn(output, target)
             else:  # 'smallest'
-                soft_labels_ = [torch.unsqueeze(guide_list[idx], dim=2) for
-                                idx in range(len(guide_list))]
-                soft_labels_softmax = [F.softmax(i, dim=1) for i in soft_labels_]
-                soft_labels_softmax = torch.cat(soft_labels_softmax, dim=2).mean(dim=2)
-                if args.ieb:
+                if args.inplace_bootstrap and args.ensemble_ib:
+                    soft_labels_ = [torch.unsqueeze(guide_list[idx], dim=2) for
+                                    idx in range(len(guide_list))]
+                    soft_labels_softmax = [F.softmax(i, dim=1) for i in soft_labels_]
+                    soft_labels_softmax = torch.cat(soft_labels_softmax, dim=2).mean(dim=2)
                     loss = distill_loss_fn(output, soft_labels_softmax)
+                elif args.inplace_bootstrap:
+                    loss = distill_loss_fn(output, F.softmax(output_largest, dim=1))
                 else:
                     loss = loss_fn(output, target)
                 loss_smallest = loss
@@ -149,7 +149,7 @@ def train_epoch_slim(
                         epoch,
                         batch_idx, last_idx,
                         100. * batch_idx / last_idx,
-                        isdistill='(distill)' if args.ieb else '',
+                        isdistill='(distill)' if args.inplace_bootstrap else '',
                         loss_smallest=losses_m_smallest,
                         loss_largest=losses_m_largest,
                         batch_time=batch_time_m,

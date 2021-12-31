@@ -34,7 +34,8 @@ train_mode: gate
 test_mode: false
 
 slim_train: true
-ieb: true
+inplace_bootstrap: true
+ensemble_ib: false
 gate_train: true
 start_chn_idx: 0  # start index of the routing space. Only useful if gate_train is set to true
 dist_bn: reduce
